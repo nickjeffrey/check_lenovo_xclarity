@@ -34,3 +34,4 @@ TROUBLESHOOTING
 
 
 You should see results similar to the following:
+<img src=images/check_lenovo_xclarity.png>
