@@ -1,0 +1,839 @@
+#!/usr/bin/perl -w
+
+
+# OUTSTANDING TASKS
+# -----------------
+
+
+#
+# Nagios plugin for checking hardware health of Lenovo servers via xClarity Controller (XCC) out of band management using SSH
+#
+
+
+# CHANGE LOG
+# ----------
+#  2020-12-09   njeffrey	Script created
+#  2020-12-11   njeffrey	Add get_vpd, get_ambient_temperature subroutines
+
+
+
+# NOTES
+# -----
+#  This script should return one (and only one) line of ouput.  Multiple
+#  lines of output are silently ignored by nagios.
+#
+#  The line of output will become the body of the alert message sent by nagios
+#
+# This script assumes that SSH key pairs are in place to allow the nagios server to connect to the xClarity Controller via SSH
+# 
+# You will need to add the following section to commands.cfg on the nagios server:
+#   # 'check_lenovo_xclarity' command definition
+#   define command{
+#           command_name    check_lenovo_xclarity
+#           command_line    $USER1$/check_lenovo_xclarity -H $HOSTADDRESS$
+#           }
+#
+#
+#
+# You will need to add the following section to services.cfg on the nagios server:
+# Define a service to check the health of Lenovo xClarity controllers
+#   define service{
+#           use                             generic-24x7-service
+#           hostgroup_name                  all_lenovo_xclarity
+#           service_description             xClarity health
+#           check_command                   check_lenovo_xclarity
+#           }
+
+
+
+# TROUBLESHOOTING
+# ---------------
+#  1) Ensure that SSH key pairs are configured correctly by attempting to SSH into the remote host as the nagios user.
+#     If you get prompted for a password, SSH key pair authentication is not working.
+#     Login to the xClarity controller, click BMC Configuration, User/LDAP, create a user called nagios, paste in contents of $HOME/.ssh/id_rsa.pub 
+
+use strict;                             #enforce good coding practices
+use Getopt::Long;                       #allow --long-switches to be used as parameters  (may need to yum install perl-Getopt-Long)
+
+# declare variables
+my ($OK,$WARN,$CRITICAL,$UNKNOWN);
+my ($CHECK_NAME,$cmd,$ssh,$ping,$pingstatus,$host,$error_count,$error_text);
+my ($opt_h,$opt_H,$opt_v);
+my ($verbose,$common_output_data,$perf_data);
+my (%syshealth,%vpd,%temperature);
+
+$CHECK_NAME                 = "xClarity health";
+$verbose                    = "no";                     #yes/no variable to increase output for debugging
+$common_output_data         = "";
+$perf_data                  = "";
+$ssh                        = "/usr/bin/ssh";		#location of binary
+$ping                       = "/bin/ping";		#location of binary
+$error_count                = 0;			#initialize counter variable
+#
+# Nagios return codes
+#
+$OK=            0;
+$WARN=          1;
+$CRITICAL=      2;
+$UNKNOWN=       3;
+
+
+
+sub get_options {
+   #
+   # this gets the command line parameters provided by the users
+   #
+   print "running get_options subroutine \n" if ($verbose eq "yes");
+   #
+   Getopt::Long::Configure('bundling');
+   GetOptions(
+      "H=s" => \$opt_H, "host=s"      => \$opt_H,
+      "h"   => \$opt_h, "help"       => \$opt_h,
+      "v"   => \$opt_v, "verbose"    => \$opt_v,
+   );
+   #
+   # If the user did not supply a -H or --host== value, generate a warning.
+   #
+   if( defined( $opt_H ) ) {
+      $host = $opt_H;
+   } else {
+      print "$CHECK_NAME Unknown - cannot determine remote host.  Usage: $0 -H host \n";
+      exit $UNKNOWN;                            #exit script
+   }
+   # 
+   # see if user provided -v or --verbose switch
+   if ( defined($opt_v) ) {
+      $verbose = "yes";
+      print "   host=$host  \n" if ($verbose eq "yes");
+   }                                                    #end of if block
+   # 
+   # see if user provided -h or --help switch
+   if ( defined($opt_h) ) {
+      print "Usage: $0 -H host \n";
+      exit $UNKNOWN;
+   }                                                    #end of if block
+
+}                       #end of subroutine
+
+
+
+
+sub sanity_checks {
+   #
+   print "running sanity_checks subroutine \n" if ($verbose eq "yes");
+   #
+   #
+   # Confirm required files exist
+   #
+   $ssh = "/bin/ssh"     if ( -f "/bin/ssh");		#different UNIX flavours put binary in different places
+   $ssh = "/usr/bin/ssh" if ( -f "/usr/bin/ssh");	#different UNIX flavours put binary in different places
+   if( ! -f $ssh ) {
+      print "$CHECK_NAME Unknown - cannot locate $ssh binary\n";
+      exit $UNKNOWN;                            #exit script
+   }                                            #end of if block
+   if( ! -x  $ssh ) {
+      print "$CHECK_NAME Unknown - $ssh is not executable\n";
+      exit $UNKNOWN;                            #exit script
+   }                                            #end of if block
+   $ping = "/bin/ping"     if ( -f "/bin/ping");	#different UNIX flavours put binary in different places
+   $ping = "/etc/ping"     if ( -f "/etc/ping");	#different UNIX flavours put binary in different places
+   $ping = "/usr/bin/ping" if ( -f "/usr/bin/ping");	#different UNIX flavours put binary in different places
+   if( ! -f $ping ) {
+      print "$CHECK_NAME Unknown - cannot locate $ping binary\n";
+      exit $UNKNOWN;                            #exit script
+   }                                            #end of if block
+   if( ! -x  $ping ) {
+      print "$CHECK_NAME Unknown - $ping is not executable\n";
+      exit $UNKNOWN;                            #exit script
+   }                                            #end of if block
+   #
+   #
+   # confirm a remote host is defined
+   if( ! defined( $host ) ) {
+      print "$CHECK_NAME Unknown - missing name of remote host to check.  Use $0 -h for help\n";
+      exit $UNKNOWN;                                    #exit script
+   }
+   #
+   #
+   #
+   # Confirm the remote host is up
+   #
+   print "   trying to ping $host \n" if ($verbose eq "yes");
+   $cmd = "$ping -c 1 -w 1 $host";
+   print "   running command: $cmd \n" if ($verbose eq "yes");
+   open(IN,"$cmd 2>&1|");     			#send a single ping to the remote host and wait 1 second for a reply
+   while (<IN>) {                                  #read a line from STDIN
+      if ( /1 packets transmitted, 1 received, 0% packet loss/ ) {                  #ping success
+         print "   ping check succeeded \n" if ($verbose eq "yes");
+      }                                            #end of if block
+      if ( /100% packet loss/ ) {                  #check for ping timeouts (indicates host may be down)
+         $pingstatus = "$CHECK_NAME UNKNOWN -- no ping reply from $host \n";
+         print $pingstatus;                        #print error message
+         exit $UNKNOWN;                            #exit script
+      }                                            #end of if block
+      if ( /NOT FOUND/ ) {                         #check for invalid hostname (using AIX ping)
+         $pingstatus = "$CHECK_NAME UNKNOWN -- could not resolve hostname $host - please check DNS\n";
+         print $pingstatus;                        #print error message
+         exit $UNKNOWN;                            #exit script
+      }                                            #end of if block 
+      if ( /Name or service not known/ ) {         #check for invalid hostname (using Linux ping) 
+         $pingstatus = "$CHECK_NAME UNKNOWN -- could not resolve hostname $host - please check DNS\n"; 
+         print $pingstatus;                        #print error message
+         exit $UNKNOWN;                            #exit script
+      }                                            #end of if block
+      if ( /unknown host/ ) {                      #check for invalid hostname (using Linux ping) 
+         $pingstatus = "$CHECK_NAME UNKNOWN -- could not resolve hostname $host - please check DNS\n"; 
+         print $pingstatus;                        #print error message
+         exit $UNKNOWN;                            #exit script
+      }                                            #end of if block
+      if ( /no route to host/ ) {                  #check for routing problems
+         $pingstatus = "$CHECK_NAME UNKNOWN -- could not find a route to $host - check routing tables \n";
+         print $pingstatus;                        #print error message
+         exit $UNKNOWN;                            #exit script
+      }                                            #end of if block
+   }                                               #end of while loop
+   close IN;                                       #close filehandle
+   #
+   #
+   # Confirm SSH public key authentication is working
+   #
+   # SSH into the xClarity controller and run the "info" command.  Output should be similar to:
+   #   system> SystemName:
+   #   ContactPerson: root@localhost
+   #   Location: building1
+   #   FullPostalAddress: server room
+   #   RoomID: room1
+   #   RackID: rack1
+   #   LowestU: 1
+   #   HeightU: 2
+   #
+   print "   trying to SSH into $host \n" if ($verbose eq "yes");
+   $cmd = "$ssh -o PreferredAuthentications=publickey -o PubKeyAuthentication=yes $host info";
+   print "   running command: $cmd \n" if ($verbose eq "yes");
+   open(IN,"$cmd 2>&1|");     			#ssh into the xClarity controller
+   while (<IN>) {                                  #read a line from STDIN
+      if ( /SystemName/) {				#look for text known to be in the command output
+         print "   confirmed SSH access \n" if ($verbose eq "yes");
+      }                                            #end of if block
+      if ( /Permission denied/ ) {                 #This is the error message if public key auth is rejected
+         print "$CHECK_NAME UNKNOWN - SSH login failed.  Please verify SSH public key authentication to xClarity controller is working. \n";
+         exit $UNKNOWN;                            #exit script
+      }                                            #end of if block
+      if ( /The authenticity of host/ ) {                 #This is the error message if public key auth is rejected
+         print "$CHECK_NAME UNKNOWN - SSH key fingerprint not recognized.  Please manually ssh from the nagios server to $host and accept the key fingerprint. \n";
+         exit $UNKNOWN;                            #exit script
+      }                                            #end of if block
+   }                                            #end of while loop
+   close IN;                                       #close filehandle
+}                                               #end of subroutine
+
+
+
+
+sub get_syshealth {
+   #
+   print "running get_syshealth subroutine \n" if ($verbose eq "yes");
+   #
+   # This subroutine runs the "syshealth ???" commands on the xClarity controller
+   # The different commands are:
+   #   syshealth summary       - display the system health summary
+   #   syshealth activeevents  - display active events
+   #   syshealth cooling       - display cooling devices health status
+   #   syshealth power         - display power modules health status
+   #   syshealth storage       - display local storage health status
+   #   syshealth processors    - display processors health status
+   #   syshealth memory        - display memory health status
+   #
+   # Sample output from each command is shown below:
+   #   system> syshealth summary
+   #   Power     On
+   #   State     Booting OS or in undetected OS
+   #   Restarts  14
+   #   Component Type     Status
+   #   ==================================
+   #   Cooling Devices    Normal
+   #   Power Modules      Warning
+   #   Local Storage      Normal
+   #   Processors         Normal
+   #   Memory             Normal
+   #   System             Normal
+   #
+   #
+   #   system> syshealth activeevents
+   #   Severity     Source       Date                     Message
+   #   --------     ------       ----                     -------
+   #   Warning      Power        2020-12-08-17:59:26.516  Non-redundant:Sufficient Resources from Redundancy Degraded or Fully Redundant for Power Resource has asserted.
+   #   Warning      Power        2020-12-08-17:59:11.704  Power Supply 1 has lost input.
+   #
+   #
+   #   system> syshealth cooling
+   #   Fan                      Speed(RPM)       Speed(% of maximum)      Status
+   #   =============================================================================
+   #   Fan 1 Tach               5670             35                       Normal
+   #   Fan 2 Tach               5670             35                       Normal
+   #   Fan 3 Tach               5670             35                       Normal
+   #   Fan 4 Tach               5544             34                       Normal
+   #   Fan 5 Tach               5670             35                       Normal
+   #   Fan 6 Tach               0                0                        Unknown
+   #
+   #
+   #   system> syshealth power
+   #   Name                     Status           Rated Power(Watts)
+   #   ============================================================
+   #   Power Supply 1           Warning          1100
+   #   Power Supply 2           Normal           1100
+   #
+   #
+   #   system> syshealth storage
+   #   Drives
+   #   FRU Name         Status
+   #   ===========================
+   #   Drive 0          Normal
+   #   Drive 1          Normal
+   #   Drive 2          Normal
+   #   Drive 3          Normal
+   #   Drive 4          Normal
+   #   Drive 5          Normal
+   #   Drive 6          Normal
+   #   Drive 7          Normal
+   #   Drive 8          Normal
+   #   Drive 9          Normal
+   #   Drive 10         Normal
+   #   Drive 11         Normal
+   #   M2 Drive 0       Normal
+   #   M2 Drive 1       Normal
+
+   #   Flash DIMMs
+   #   FRU Name         Status
+   #   ===========================
+   #
+   #
+   #
+   #   system> syshealth processors
+   #   FRU Name         Status           Clock Speed
+   #   ===================================================
+   #   CPU 1            Normal           3200 MHz
+   #
+   #
+   #   system> syshealth memory
+   #   FRU Name         Status           Type             Capacity(GB)
+   #   ===============================================================
+   #   DIMM 1           Normal           DDR4             16
+   #   DIMM 2           Normal           DDR4             16
+   #   DIMM 3           Normal           DDR4             16
+   #   DIMM 4           Normal           DDR4             16
+   #   DIMM 5           Normal           DDR4             16
+   #   DIMM 6           Normal           DDR4             16
+   #   DIMM 7           Normal           DDR4             16
+   #   DIMM 8           Normal           DDR4             16
+   #   DIMM 9           Normal           DDR4             16
+   #   DIMM 10          Normal           DDR4             16
+   #   DIMM 11          Normal           DDR4             16
+   #   DIMM 12          Normal           DDR4             16
+   #
+   #
+   #
+   #
+   # Get the health status from the xClarity Controller
+   #
+   $cmd = "$ssh -o PreferredAuthentications=publickey -o PubKeyAuthentication=yes $host syshealth summary";
+   print "   running command: $cmd \n" if ($verbose eq "yes");
+   open(IN,"$cmd 2>&1|");                                                    #open filehandle from command output
+   while (<IN>) {                                                            #read a line from the command output
+      if ( /^Cooling Devices +([a-zA-Z]+)/ ) {                               #find health metric
+         $syshealth{summary}{Cooling_Devices} = $1;                          #save value to hash
+         print "   Cooling_Devices:$syshealth{summary}{Cooling_Devices} \n" if ($verbose eq "yes");
+      }                                                                      #end of if block
+      if ( /^Power Modules +([a-zA-Z]+)/ ) {                                 #find health metric
+         $syshealth{summary}{Power_Modules} = $1;                            #save value to hash
+         print "   Power_Modules:$syshealth{summary}{Power_Modules} \n" if ($verbose eq "yes");
+      }                                                                      #end of if block
+      if ( /^Local Storage +([a-zA-Z]+)/ ) {                                 #find health metric
+         $syshealth{summary}{Local_Storage} = $1;                            #save value to hash
+         print "   Local_Storage:$syshealth{summary}{Local_Storage} \n" if ($verbose eq "yes");
+      }                                                                      #end of if block
+      if ( /^Processors +([a-zA-Z]+)/ ) {                                    #find health metric
+         $syshealth{summary}{Processors} = $1;                               #save value to hash
+         print "   Processors:$syshealth{summary}{Processors} \n" if ($verbose eq "yes");
+      }                                                                      #end of if block
+      if ( /^Memory +([a-zA-Z]+)/ ) {                                        #find health metric
+         $syshealth{summary}{Memory} = $1;                                   #save value to hash
+         print "   Memory:$syshealth{summary}{Memory} \n" if ($verbose eq "yes");
+      }                                                                      #end of if block
+      if ( /^System +([a-zA-Z]+)/ ) {                                        #find health metric
+         $syshealth{summary}{System} = $1;                                   #save value to hash
+         print "   System:$syshealth{summary}{System} \n" if ($verbose eq "yes");
+      }                                                                      #end of if block
+   }                                                                         #end of while loop
+   close IN;                                                                 #close filehandle
+}                                               #end of subroutine
+
+
+sub get_vpd {
+   #
+   print "running get_vpd subroutine \n" if ($verbose eq "yes");
+   #
+   # This subroutine runs the "vpd ???" commands on the xClarity controller to get Vital Product Data 
+   # The different commands are:
+   #   system> vpd
+   #   usage:
+   #      vpd sys  - displays Vital Product Data for the system
+   #      vpd bmc  - displays Vital Product Data for the management controller
+   #      vpd uefi - displays Vital Product Data for system BIOS
+   #      vpd lxpm - displays Vital Product Data for system LXPM
+   #      vpd fw   - displays Vital Product Data for the system firmware
+   #      vpd comp - displays Vital Product Data for the system components
+   #      vpd aep  - displays Vital Product Data for AEP memory
+   #      vpd pcie - displays Vital Product Data for PCIe devices
+   #
+   #
+   # Sample output from each command is shown below:
+   #   system> vpd sys
+   #   Machine Type-Model             Serial Number                  UUID
+   #   --------------                 ---------                      ----
+   #   7X06CTO1WW                     J10151BM                       D1B213B407C811EB9A923A68DD39EEAF
+   #   
+   #   system> vpd sys
+   #   Machine Type-Model             Serial Number                  UUID
+   #   --------------                 ---------                      ----
+   #   7X06CTO1WW                     J10151BM                       D1B213B407C811EB9A923A68DD39EEAF
+   #   
+   #   system> vpd bmc
+   #   Type                     Status       Version      BuildID          ReleaseDate
+   #   ----                     ------       -------      -------          -----------
+   #   BMC(Primary)             Active       4.80         CDI358P          2020-07-14
+   #   BMC(Backup)              Inactive     4.20         CDI352T          2020-04-25
+   #   
+   #   system> vpd uefi
+   #   Type                     Status       Version      BuildID          ReleaseDate
+   #   ----                     ------       -------      -------          -----------
+   #   UEFI                     Active       2.71         IVE160N          2020-09-18
+   #   
+   #   system> vpd lxpm
+   #   Type                     Status       Version      BuildID          ReleaseDate
+   #   ----                     ------       -------      -------          -----------
+   #   LXPM                     Active       2.01         PDL128L          2020-08-25
+   #   LXPM Windows Drivers     Active       2.00         PDL328D          2020-07-09
+   #   LXPM Linux Drivers       Active       2.00         PDL228D          2020-07-09
+   #   
+   #   system> vpd fw
+   #   Type                     Status       Version      BuildID          ReleaseDate
+   #   ----                     ------       -------      -------          -----------
+   #   BMC(Primary)             Active       4.80         CDI358P          2020-07-14
+   #   BMC(Backup)              Inactive     4.20         CDI352T          2020-04-25
+   #   UEFI                     Active       2.71         IVE160N          2020-09-18
+   #   LXPM                     Active       2.01         PDL128L          2020-08-25
+   #   LXPM Windows Drivers     Active       2.00         PDL328D          2020-07-09
+   #   LXPM Linux Drivers       Active       2.00         PDL228D          2020-07-09
+   #   
+   #   system> vpd comp
+   #   FRU Name                 FRU ID               Entity ID        Status
+   #   --------                 ------               ---------        ------
+   #   CPU 1                    0x1                  0x3              PRSENT
+   #   CPU 2                    0x2                  0x3              ABSENT
+   #   Rear Backplane           0x54                 0xf              ABSENT
+   #   Backplane 1              0x51                 0xf              PRSENT
+   #   Backplane 2              0x52                 0xf              ABSENT
+   #   Backplane 3              0x53                 0xf              ABSENT
+   #   Riser 1                  0x41                 0x10             PRSENT
+   #   Riser 2                  0x42                 0x10             ABSENT
+   #   ML2_Card                 0x43                 0x2c             ABSENT
+   #   M2 Card                  0x45                 0xb              PRSENT
+   #   PHY_Card                 0x44                 0x2c             PRSENT
+   #   PSU 1                    0x21                 0xa              PRSENT
+   #   PSU 2                    0x22                 0xa              PRSENT
+   #   DIMM_1                   0x60                 0x20             PRSENT
+   #   DIMM_2                   0x61                 0x20             PRSENT
+   #   DIMM_3                   0x62                 0x20             PRSENT
+   #   DIMM_4                   0x63                 0x20             PRSENT
+   #   DIMM_5                   0x64                 0x20             PRSENT
+   #   DIMM_6                   0x65                 0x20             PRSENT
+   #   DIMM_7                   0x66                 0x20             PRSENT
+   #   DIMM_8                   0x67                 0x20             PRSENT
+   #   DIMM_9                   0x68                 0x20             PRSENT
+   #   DIMM_10                  0x69                 0x20             PRSENT
+   #   DIMM_11                  0x6a                 0x20             PRSENT
+   #   DIMM_12                  0x6b                 0x20             PRSENT
+   #   DIMM_13                  0x6c                 0x20             ABSENT
+   #   DIMM_14                  0x6d                 0x20             ABSENT
+   #   DIMM_15                  0x6e                 0x20             ABSENT
+   #   DIMM_16                  0x6f                 0x20             ABSENT
+   #   DIMM_17                  0x70                 0x20             ABSENT
+   #   DIMM_18                  0x71                 0x20             ABSENT
+   #   DIMM_19                  0x72                 0x20             ABSENT
+   #   DIMM_20                  0x73                 0x20             ABSENT
+   #   DIMM_21                  0x74                 0x20             ABSENT
+   #   DIMM_22                  0x75                 0x20             ABSENT
+   #   DIMM_23                  0x76                 0x20             ABSENT
+   #   DIMM_24                  0x77                 0x20             ABSENT
+   #   
+   #   system> vpd aep
+   #   No AEP memory on currnet system.
+   #   
+   #   system> vpd pcie
+   #   Adapter Name: Intel X722 LOM
+   #   Function Name: Intel X722 LOM 0B:00:00
+   #   Firmware Count: 2
+   #   
+   #   Firmware Name: Combined Option ROM Image
+   #   Version String: 1.2585.0
+   #   Description: Combined Option ROM Image
+   #   Release Date: N/A
+   #   Classification: Boot ROM
+   #   Manufacturer: Intel
+   #   Software Id: 17AA4021
+   #   
+   #   Firmware Name: Etrack ID
+   #   Version String: 80001FA0
+   #   Description: Etrack ID
+   #   Release Date: N/A
+   #   Classification: Firmware
+   #   Manufacturer: Intel
+   #   Software Id: 17AA4021
+   #   
+   #   Function Name: Intel X722 LOM 0B:00:01
+   #   Firmware Count: 2
+   #   
+   #   Firmware Name: Combined Option ROM Image
+   #   Version String: 1.2585.0
+   #   Description: Combined Option ROM Image
+   #   Release Date: N/A
+   #   Classification: Boot ROM
+   #   Manufacturer: Intel
+   #   Software Id: 17AA4021
+   #   
+   #   Firmware Name: Etrack ID
+   #   Version String: 80001FA0
+   #   Description: Etrack ID
+   #   Release Date: N/A
+   #   Classification: Firmware
+   #   Manufacturer: Intel
+   #   Software Id: 17AA4021
+   #   
+   #   Function Name: Intel X722 LOM 0B:00:02
+   #   Firmware Count: 2
+   #   
+   #   Firmware Name: Combined Option ROM Image
+   #   Version String: 1.2585.0
+   #   Description: Combined Option ROM Image
+   #   Release Date: N/A
+   #   Classification: Boot ROM
+   #   Manufacturer: Intel
+   #   Software Id: 17AA4021
+   #   
+   #   Firmware Name: Etrack ID
+   #   Version String: 80001FA0
+   #   Description: Etrack ID
+   #   Release Date: N/A
+   #   Classification: Firmware
+   #   Manufacturer: Intel
+   #   Software Id: 17AA4021
+   #   
+   #   Function Name: Intel X722 LOM 0B:00:03
+   #   Firmware Count: 2
+   #   
+   #   Firmware Name: Combined Option ROM Image
+   #   Version String: 1.2585.0
+   #   Description: Combined Option ROM Image
+   #   Release Date: N/A
+   #   Classification: Boot ROM
+   #   Manufacturer: Intel
+   #   Software Id: 17AA4021
+   #   
+   #   Firmware Name: Etrack ID
+   #   Version String: 80001FA0
+   #   Description: Etrack ID
+   #   Release Date: N/A
+   #   Classification: Firmware
+   #   Manufacturer: Intel
+   #   Software Id: 17AA4021
+   #   
+   #   Adapter Name: Adapter 02:00:00
+   #   There is no firmware info for this apapter.
+   #   
+   #   Adapter Name: Onboard SATA Controller
+   #   Function Name: Onboard SATA Controller 00:17:00
+   #   Firmware Count: 0
+   #   Adapter Name: Onboard SSATA Controller
+   #   Function Name: Onboard SSATA Controller 00:11:05
+   #   Firmware Count: 0
+   #   
+   #   Adapter Name: Broadcom NetXtreme PCIe 1Gb 4-Port RJ45 Ethernet Adapter
+   #   Function Name: Broadcom NetXtreme PCIe 1Gb 4-Port RJ45 Ethernet Adapter 08:00:00
+   #   Firmware Count: 1
+   #   
+   #   Firmware Name: Firmware Bundle
+   #   Version String: 216.0.4.2
+   #   Description: Consolidated Adapter Firmware Package Level.
+   #   Release Date: N/A
+   #   Classification: Software Bundle
+   #   Manufacturer: Broadcom Limited
+   #   Software Id: 17AA402D
+   #   
+   #   Function Name: Broadcom NetXtreme PCIe 1Gb 4-Port RJ45 Ethernet Adapter 08:00:01
+   #   Firmware Count: 1
+   #   
+   #   Firmware Name: Firmware Bundle
+   #   Version String: 216.0.4.2
+   #   Description: Consolidated Adapter Firmware Package Level.
+   #   Release Date: N/A
+   #   Classification: Software Bundle
+   #   Manufacturer: Broadcom Limited
+   #   Software Id: 17AA402D
+   #   
+   #   Function Name: Broadcom NetXtreme PCIe 1Gb 4-Port RJ45 Ethernet Adapter 08:00:02
+   #   Firmware Count: 1
+   #   
+   #   Firmware Name: Firmware Bundle
+   #   Version String: 216.0.4.2
+   #   Description: Consolidated Adapter Firmware Package Level.
+   #   Release Date: N/A
+   #   Classification: Software Bundle
+   #   Manufacturer: Broadcom Limited
+   #   Software Id: 17AA402D
+   #   
+   #   Function Name: Broadcom NetXtreme PCIe 1Gb 4-Port RJ45 Ethernet Adapter 08:00:03
+   #   Firmware Count: 1
+   #   Firmware Name: Firmware Bundle
+   #   Version String: 216.0.4.2
+   #   Description: Consolidated Adapter Firmware Package Level.
+   #   Release Date: N/A
+   #   Classification: Software Bundle
+   #   Manufacturer: Broadcom Limited
+   #   Software Id: 17AA402D
+   #   
+   #   Adapter Name: Emulex 01CV842 16Gb FC Dual-port HBA
+   #   Function Name: Emulex 01CV842 16Gb FC Dual-port HBA AE:00:00
+   #   Firmware Count: 1
+   #   
+   #   Firmware Name: Software Bundle
+   #   Version String: 12.6.221.25
+   #   Description: Firmware package containing controller firmware, UEFI Driver, and other sub components.
+   #   Release Date: 04/18/2020
+   #   Classification: Software Bundle
+   #   Manufacturer: Emulex Corporation
+   #   Software Id: 10DFE332
+   #   
+   #   Function Name: Emulex 01CV842 16Gb FC Dual-port HBA AE:00:01
+   #   Firmware Count: 1
+   #   
+   #   Firmware Name: Software Bundle
+   #   Version String: 12.6.221.25
+   #   Description: Firmware package containing controller firmware, UEFI Driver, and other sub components.
+   #   Release Date: 04/18/2020
+   #   Classification: Software Bundle
+   #   Manufacturer: Emulex Corporation
+   #   Software Id: 10DFE332
+   #   
+   #   Adapter Name: ThinkSystem RAID 930-16i 8GB Flash PCIe 12Gb Adapter
+   #   Function Name: ThinkSystem RAID 930-16i 8GB Flash PCIe 12Gb Adapter AF:00:00
+   #   Firmware Count: 1
+   #   
+   #   Firmware Name: MegaRAID Firmware Package
+   #   Version String: 51.13.0-3624
+   #   Description: Firmware package containing controller firmware, UEFI Driver, and other sub components.
+   #   Release Date: 09/14/2020
+   #   Classification: Software Bundle
+   #   Manufacturer: AVAGO Technologies
+   #   Software Id: 1D490607
+   #   Adapter Name: ThinkSystem M.2 with Mirroring Enablement Kit
+   #   Function Name: ThinkSystem M.2 with Mirroring Enablement Kit 03:00:00
+   #   Firmware Count: 2
+   #   
+   #   Firmware Name: Marvell Firmware
+   #   Version String: 2.3.10.1199
+   #   Description: Marvell Storage Raid Controller Firmware
+   #   Release Date: 02/21/2019
+   #   Classification: Firmware
+   #   Manufacturer: Marvell
+   #   Software Id: 1D490300
+   #   
+   #   Firmware Name: MRVL UEFI AHCI Driver and BIOS
+   #   Version String: 0.0.10.1030
+   #   Description: Marvell UEFI AHCI and Legacy BIOS Option ROM
+   #   Release Date: 01/29/2019
+   #   Classification: Boot ROM
+   #   Manufacturer: Marvell
+   #   Software Id: 1D490300
+   #
+   #
+   #
+   #
+   # Get the VPD (Vital Product Data) from the xClarity Controller.  We are most interested in model/serial/firmware.
+   #
+   $cmd = "$ssh -o PreferredAuthentications=publickey -o PubKeyAuthentication=yes $host vpd sys";
+   print "   running command: $cmd \n" if ($verbose eq "yes");
+   open(IN,"$cmd 2>&1|");                                                    #open filehandle from command output
+   while (<IN>) {                                                            #read a line from the command output
+      next if (/^Machine Type/);					     #skip header row
+      next if (/^\-/);					     	     	     #skip header row
+      if ( /^([a-zA-Z0-9]+) +([a-zA-Z0-9]+)/ ) {                               #find health metric
+         $vpd{sys}{Model}  = $1;                          #save value to hash
+         $vpd{sys}{Serial} = $2;                          #save value to hash
+         print "   Model:$vpd{sys}{Model} Serial:$vpd{sys}{Serial} \n" if ($verbose eq "yes");
+      }                                                                      #end of if block
+   }                                                                         #end of while loop
+   close IN;                                                                 #close filehandle
+   #
+   $cmd = "$ssh -o PreferredAuthentications=publickey -o PubKeyAuthentication=yes $host vpd fw";
+   print "   running command: $cmd \n" if ($verbose eq "yes");
+   open(IN,"$cmd 2>&1|");                                                    #open filehandle from command output
+   while (<IN>) {                                                            #read a line from the command output
+      next if (/^Type/);						     #skip header row
+      next if (/^\-/);					     	     	     #skip header row
+      if ( /^BMC\(Primary\) +Active +([0-9\.]+)/ ) {                         #find firmware level for BMC
+         $vpd{fw}{BMC_Primary}  = $1;		                             #save value to hash
+         print "   BMC:$vpd{fw}{BMC_Primary} \n" if ($verbose eq "yes");
+      }                                                                      #end of if block
+      if ( /^UEFI +Active +([0-9\.]+)/ ) {                         #find firmware level for BMC
+         $vpd{fw}{UEFI}  = $1;		                             #save value to hash
+         print "   UEFI:$vpd{fw}{UEFI} \n" if ($verbose eq "yes");
+      }                                                                      #end of if block
+   }                                                                         #end of while loop
+   close IN;                                                                 #close filehandle
+}                                               #end of subroutine
+
+
+
+
+sub get_ambient_temperature {
+   #
+   print "running get_ambient_temperature subroutine \n" if ($verbose eq "yes");
+   #
+   # This subroutine runs the "temps" command on the xClarity controller to read the temperature sensors
+   # Sample output is shown below:
+   #   system> temps
+   #   Temperatures are displayed in degrees Fahrenheit/Celsius
+   #                    WR            W             T             SS            HS
+   #   ---------------------------------------------------------------------------------------
+   #   CPU1 Temp        N/A           N/A           93.20/34.00   N/A           N/A
+   #   CPU1 DTS         N/A           N/A           -59.80/-51.00 32.00/-0.20   32.00/0.00
+   #   DIMM 1 Temp      N/A           N/A           80.60/27.00   N/A           N/A
+   #   DIMM 2 Temp      N/A           N/A           80.60/27.00   N/A           N/A
+   #   DIMM 3 Temp      N/A           N/A           84.20/29.00   N/A           N/A
+   #   DIMM 4 Temp      N/A           N/A           84.20/29.00   N/A           N/A
+   #   DIMM 5 Temp      N/A           N/A           82.40/28.00   N/A           N/A
+   #   DIMM 6 Temp      N/A           N/A           82.40/28.00   N/A           N/A
+   #   DIMM 7 Temp      N/A           N/A           80.60/27.00   N/A           N/A
+   #   DIMM 8 Temp      N/A           N/A           80.60/27.00   N/A           N/A
+   #   DIMM 9 Temp      N/A           N/A           78.80/26.00   N/A           N/A
+   #   DIMM 10 Temp     N/A           N/A           78.80/26.00   N/A           N/A
+   #   DIMM 11 Temp     N/A           N/A           77.00/25.00   N/A           N/A
+   #   DIMM 12 Temp     N/A           N/A           77.00/25.00   N/A           N/A
+   #   PCH Temp         N/A           N/A           105.80/41.00  N/A           N/A
+   #   Ambient Temp     109.40/43     109.40/43.00  62.60/17.00   116.60/47.00  122.00/50.00
+   #   Exhaust Temp     N/A           N/A           69.80/21.00   N/A           N/A
+   #
+   #   column headings:
+   #        WR is warning reset (Positive-going Threshold Hysteresis value)
+   #        W is warning (Upper non-critical Threshold)
+   #        T is temperature (current)
+   #        SS is soft shutdown (Upper critical Threshold)
+   #        HS is hard shutdown (Upper non-recoverable Threshold)
+   #
+   #
+   # Get the temperature readings
+   #
+   $temperature{ambient} = "unknown";						#initialize value to avoid undef errors
+   $cmd = "$ssh -o PreferredAuthentications=publickey -o PubKeyAuthentication=yes $host temps";
+   print "   running command: $cmd \n" if ($verbose eq "yes");
+   open(IN,"$cmd 2>&1|");                                                    #open filehandle from command output
+   while (<IN>) {                                                            #read a line from the command output
+      next if (/^\-/);					     	     	     #skip header row
+      if ( /^Ambient Temp +[0-9\.\/]+ +[0-9\.\/]+ +[0-9\.]+\/([0-9\.]+)/ ) {   #find ambient temperature
+         $temperature{ambient} = $1;                          #save value to hash
+         print "   Temperature:$temperature{ambient}C \n" if ($verbose eq "yes");
+      }                                                                      #end of if block
+   }                                                                         #end of while loop
+   close IN;                                                                 #close filehandle
+}                                               #end of subroutine
+
+
+sub print_output {
+   #
+   print "running print_output subroutine \n" if ($verbose eq "yes");
+   #
+   #
+   #
+   #
+   # This check does not generate nagios performance data, so the output will be null.
+   # If performance data is added in the future, 
+   # The format is:  label=value[UOM];[warn];[crit];[min];[max]
+   # On the "label=value" section is required.  The warn|crit|min|max entries are optional.
+   # You can have multiple items of perf data, just separate each section with a space
+   # UOM is Units Of Measurement.    Can be s=seconds B=bytes MB=megabytes %=percent c=counter
+   $perf_data = "";
+   #
+   # Much of the text of the output will be the same.  Put the common stuff in a variable so we can simplify the outputs
+   $common_output_data = "Ambient_temperature:$temperature{ambient}C Cooling_Devices:$syshealth{summary}{Cooling_Devices} Power_Modules:$syshealth{summary}{Power_Modules} Local_Storage:$syshealth{summary}{Local_Storage} Processors:$syshealth{summary}{Processors} Memory:$syshealth{summary}{Memory} System:$syshealth{summary}{System} Model:$vpd{sys}{Model} Serial:$vpd{sys}{Serial} BMC_firmware:$vpd{fw}{BMC_Primary} UEFI_firmware:$vpd{fw}{UEFI}";
+   #
+   # Check for problems
+   unless ( $syshealth{summary}{Cooling_Devices} eq "Normal" ) {
+      $error_count++;					#increment counter
+      $error_text = "Cooling problem detected.  Please SSH into xClarity controller and run syshealth cooling, syshealth activeevents.";
+      $common_output_data = "$error_text $common_output_data";
+   }							#end of unless block
+   unless ( $syshealth{summary}{Power_Modules} eq "Normal" ) {
+      $error_count++;					#increment counter
+      $error_text = "Power Module problem detected.  Please SSH into xClarity controller and run syshealth power, syshealth activeevents.";
+      $common_output_data = "$error_text $common_output_data";
+   }							#end of unless block
+   unless ( $syshealth{summary}{Local_Storage} eq "Normal" ) {
+      $error_count++;					#increment counter
+      $error_text = "Local Storage problem detected.  Please SSH into xClarity controller and run syshealth storage, syshealth activeevents.";
+      $common_output_data = "$error_text $common_output_data";
+   }							#end of unless block
+   unless ( $syshealth{summary}{Processors} eq "Normal" ) {
+      $error_count++;					#increment counter
+      $error_text = "Processor problem detected.  Please SSH into xClarity controller and run syshealth processor, syshealth activeevents.";
+      $common_output_data = "$error_text $common_output_data";
+   }							#end of unless block
+   unless ( $syshealth{summary}{Memory} eq "Normal" ) {
+      $error_count++;					#increment counter
+      $error_text = "Memory problem detected.  Please SSH into xClarity controller and run syshealth memory, syshealth activeevents.";
+      $common_output_data = "$error_text $common_output_data";
+   }							#end of unless block
+   unless ( $syshealth{summary}{System} eq "Normal" ) {
+      $error_count++;					#increment counter
+      $error_text = "System problem detected.  Please SSH into xClarity controller and run syshealth system.";
+      $common_output_data = "$error_text $common_output_data";
+   }							#end of unless block
+   #
+   # If there are multiple errors, remind the sysadmin that there is more than one error to investigate.
+   #
+   if ($error_count > 1 ) {
+      print "$CHECK_NAME WARN - Multiple problems detected.  $common_output_data | $perf_data  \n";
+      exit $WARN;
+   }							#end of if block
+   #
+   # If there is only one error, just show the error text.
+   #
+   if ($error_count == 1 ) {
+      print "$CHECK_NAME WARN - $common_output_data | $perf_data  \n";
+      exit $WARN;
+   }							#end of if block
+   #
+   # We should only get here if there were no problems detected
+   #
+   if ($error_count == 0 ) {
+      print "$CHECK_NAME OK - $common_output_data | $perf_data  \n";
+      exit $OK;
+   }							#end of if block
+}                                                       #end of subroutine
+
+
+
+
+
+
+
+
+
+# --------------- main body of program ------------------------------------
+get_options;
+sanity_checks;
+get_syshealth;
+get_vpd;
+get_ambient_temperature;
+print_output;
+
