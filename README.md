@@ -32,3 +32,5 @@ TROUBLESHOOTING
    If you get prompted for a password, SSH key pair authentication is not working.
    Login to the xClarity controller, click BMC Configuration, User/LDAP, create a user called nagios, paste in contents of $HOME/.ssh/id_rsa.pub 
 
+
+You should see results similar to the following:
