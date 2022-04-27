@@ -3,6 +3,20 @@ nagios check for Lenovo xClarity service processors
 
 Nagios plugin for checking hardware health of Lenovo servers via xClarity Controller (XCC) out of band management using SSH
 
+# Preparation
+Connect the xClarity ethernet interface to the network and give it an IP address
+<br><img src=images/xclarity_interface.png>
+
+# Create userid on xClarity 
+Login to the xClarity web interface
+Click BMC Configuration, User/LDAP
+<br><img src=xclarity_bmc.png>
+
+Create a userid called nagios with the Read-only authority level.
+Paste the contents of the $HOME/.ssh/id_rsa.pub file from the nagios server into the text field.  This will allow the nagios userid on the nagios server to SSH into the xClarity port to retrieve health metrics.
+<br><img src=images/xclarity_sshkey.png>
+
+
 This script assumes that SSH key pairs are in place to allow the nagios server to connect to the xClarity Controller via SSH
 
 You will need to add the following section to commands.cfg on the nagios server:
