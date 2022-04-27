@@ -10,7 +10,7 @@ Connect the xClarity ethernet interface to the network and give it an IP address
 # Create userid on xClarity 
 Login to the xClarity web interface
 Click BMC Configuration, User/LDAP
-<br><img src=xclarity_bmc.png>
+<br><img src=images/xclarity_bmc.png>
 
 Create a userid called nagios with the Read-only authority level.
 Paste the contents of the $HOME/.ssh/id_rsa.pub file from the nagios server into the text field.  This will allow the nagios userid on the nagios server to SSH into the xClarity port to retrieve health metrics.
