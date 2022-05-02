@@ -41,7 +41,7 @@ ssh-rsa AAAAB3NzaC1yc____key_truncated___4exHCpN nagios@nagios01.example.com
 At this point, you should be able to SSH from the nagios server to the xClarity without a password and run commands:
 ```
 [nagios@nagios01.example.com~]$ ssh server-xclarity.example.com
-system> system> vpd sys
+system> vpd sys
 Machine Type-Model             Serial Number                  UUID
 --------------                 ---------                      ----
 7Z46CTO1XX                     J100VXXX                       7D7D6AFE4D9511EAB0B80A3A88XXXXXX
