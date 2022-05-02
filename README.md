@@ -3,11 +3,51 @@ nagios check for Lenovo xClarity service processors
 
 Nagios plugin for checking hardware health of Lenovo servers via xClarity Controller (XCC) out of band management using SSH
 
+# Requirements
+perl, low-privilege read-only user account on xClarity, SSH key pair auth between nagios server and xClarity
+
 # Preparation
 Connect the xClarity ethernet interface to the network and give it an IP address
 <br><img src=images/xclarity_interface.png>
 
-# Create userid on xClarity 
+# Create userid on xClarity (CLI method)
+SSH into the xClarity with the built-in USERID account.
+Check to see what users already exist.  In this example, only the default USERID account exists, which means the next available numeric account id will be 2.
+```
+system> users
+ Account      Login ID      Advanced Attribute                       Access            Password Expires
+ -------      --------      ------------------                       ------            ----------------
+    1           USERID                  Native                   Read/Write     Password doesn't expire
+```
+
+Create the new userid with numeric index 2 (adjust as appropriate if your xClarity already has more users)
+```
+system> users -2 -n nagios -p SecretPass -a ro
+```
+
+Grab the SSH public key from the nagios server.
+In this example, -2 refers to the numeric index of the user account, and -1 refers to the numeric key_index for the SSH public key.
+```
+system> users -2 -pk -upld -1 -i nagios01.example.com -u SomeUserName -pw SomePassword -l /path/to/id_rsa.pub
+ok
+```
+
+Confirm the SSH public key for the newly created nagios user on the xClarity is visible:
+```
+system> users -2 -pk -e -1
+ssh-rsa AAAAB3NzaC1yc____key_truncated___4exHCpN nagios@nagios01.example.com
+```
+
+At this point, you should be able to SSH from the nagios server to the xClarity without a password and run commands:
+```
+[nagios@nagios01.example.com~]$ ssh server-xclarity.example.com
+system> system> vpd sys
+Machine Type-Model             Serial Number                  UUID
+--------------                 ---------                      ----
+7Z46CTO1XX                     J100VXXX                       7D7D6AFE4D9511EAB0B80A3A88XXXXXX
+```
+
+# Create userid on xClarity (GUI method)
 Login to the xClarity web interface
 Click BMC Configuration, User/LDAP
 <br><img src=images/xclarity_bmc.png>
