@@ -14,6 +14,7 @@
 # ----------
 #  2020-12-09   njeffrey	Script created
 #  2020-12-11   njeffrey	Add get_vpd, get_ambient_temperature subroutines
+#  2022-05-12   njeffrey	Add nagios performance data to output
 
 
 
@@ -27,10 +28,10 @@
 # This script assumes that SSH key pairs are in place to allow the nagios server to connect to the xClarity Controller via SSH
 # 
 # You will need to add the following section to commands.cfg on the nagios server:
-#   # 'check_lenovo_xclarity' command definition
+#   # 'check_xclarity' command definition
 #   define command{
-#           command_name    check_lenovo_xclarity
-#           command_line    $USER1$/check_lenovo_xclarity -H $HOSTADDRESS$
+#           command_name    check_xclarity
+#           command_line    $USER1$/check_xclarity -H $HOSTADDRESS$
 #           }
 #
 #
@@ -38,10 +39,10 @@
 # You will need to add the following section to services.cfg on the nagios server:
 # Define a service to check the health of Lenovo xClarity controllers
 #   define service{
-#           use                             generic-24x7-service
-#           hostgroup_name                  all_lenovo_xclarity
+#           use                             generic-service
+#           hostgroup_name                  all_xclarity
 #           service_description             xClarity health
-#           check_command                   check_lenovo_xclarity
+#           check_command                   check_xclarity
 #           }
 
 
@@ -762,10 +763,10 @@ sub print_output {
    # On the "label=value" section is required.  The warn|crit|min|max entries are optional.
    # You can have multiple items of perf data, just separate each section with a space
    # UOM is Units Of Measurement.    Can be s=seconds B=bytes MB=megabytes %=percent c=counter
-   $perf_data = "";
+   $perf_data = "ambient_temperature_C=$temperature{ambient};;;;";
    #
    # Much of the text of the output will be the same.  Put the common stuff in a variable so we can simplify the outputs
-   $common_output_data = "Ambient_temperature:$temperature{ambient}C Cooling_Devices:$syshealth{summary}{Cooling_Devices} Power_Modules:$syshealth{summary}{Power_Modules} Local_Storage:$syshealth{summary}{Local_Storage} Processors:$syshealth{summary}{Processors} Memory:$syshealth{summary}{Memory} System:$syshealth{summary}{System} Model:$vpd{sys}{Model} Serial:$vpd{sys}{Serial} BMC_firmware:$vpd{fw}{BMC_Primary} UEFI_firmware:$vpd{fw}{UEFI}";
+   $common_output_data = "Ambient_temperature:$temperature{ambient}C Cooling_Devices:$syshealth{summary}{Cooling_Devices} Power_Modules:$syshealth{summary}{Power_Modules} Local_Storage:$syshealth{summary}{Local_Storage} Processors:$syshealth{summary}{Processors} Memory:$syshealth{summary}{Memory} System:$syshealth{summary}{System} Model:$vpd{sys}{Model} Serial:$vpd{sys}{Serial} BMC_firmware:$vpd{fw}{BMC_Primary} UEFI_firmware:$vpd{fw}{UEFI} | $perf_data ";
    #
    # Check for problems
    unless ( $syshealth{summary}{Cooling_Devices} eq "Normal" ) {
@@ -802,21 +803,21 @@ sub print_output {
    # If there are multiple errors, remind the sysadmin that there is more than one error to investigate.
    #
    if ($error_count > 1 ) {
-      print "$CHECK_NAME WARN - Multiple problems detected.  $common_output_data | $perf_data  \n";
+      print "$CHECK_NAME WARN - Multiple problems detected.  $common_output_data \n";
       exit $WARN;
    }							#end of if block
    #
    # If there is only one error, just show the error text.
    #
    if ($error_count == 1 ) {
-      print "$CHECK_NAME WARN - $common_output_data | $perf_data  \n";
+      print "$CHECK_NAME WARN - $common_output_data \n";
       exit $WARN;
    }							#end of if block
    #
    # We should only get here if there were no problems detected
    #
    if ($error_count == 0 ) {
-      print "$CHECK_NAME OK - $common_output_data | $perf_data  \n";
+      print "$CHECK_NAME OK - $common_output_data \n";
       exit $OK;
    }							#end of if block
 }                                                       #end of subroutine
