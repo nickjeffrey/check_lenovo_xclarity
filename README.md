@@ -73,7 +73,7 @@ You will need to add the following section to services.cfg on the nagios server:
 ```
     # Define a service to check the health of Lenovo xClarity controllers
     define service{
-           use                             generic-24x7-service
+           use                             generic-service
            hostgroup_name                  all_lenovo_xclarity
            service_description             xClarity health
            check_command                   check_lenovo_xclarity
