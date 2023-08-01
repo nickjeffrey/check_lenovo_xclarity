@@ -16,7 +16,7 @@
 #  2020-12-11   njeffrey	Add get_vpd, get_ambient_temperature subroutines
 #  2022-06-20 	njeffrey	Add performance data to output for graphing
 #  2023-08-01	njeffrey	Add error checks for validating SSH key pair authentication
-
+#  2023-08-02	njeffrey	Add variables $ambient_temperature_warn, $ssh_access, $opt_t
 
 
 # NOTES
@@ -32,18 +32,19 @@
 #   # 'check_lenovo_xclarity' command definition
 #   define command{
 #           command_name    check_lenovo_xclarity
-#           command_line    $USER1$/check_lenovo_xclarity -H $HOSTADDRESS$
+#           command_line    $USER1$/check_lenovo_xclarity -H $HOSTADDRESS$ --temperature=$ARG1$
 #           }
 #
 #
 #
 # You will need to add the following section to services.cfg on the nagios server:
 # Define a service to check the health of Lenovo xClarity controllers
+# There is an optional parameter (defaults to 25) to set the warning threshold for ambient temperature in degrees Celsius
 #   define service{
 #           use                             generic-24x7-service
 #           hostgroup_name                  all_lenovo_xclarity
 #           service_description             xClarity health
-#           check_command                   check_lenovo_xclarity
+#           check_command                   check_lenovo_xclarity!25
 #           }
 
 
@@ -60,7 +61,8 @@ use Getopt::Long;                       #allow --long-switches to be used as par
 # declare variables
 my ($OK,$WARN,$CRITICAL,$UNKNOWN);
 my ($CHECK_NAME,$cmd,$ssh,$ping,$pingstatus,$host,$error_count,$error_text);
-my ($opt_h,$opt_H,$opt_v);
+my ($ambient_temperature_warn,$ssh_access);
+my ($opt_h,$opt_H,$opt_v,$opt_t);
 my ($verbose,$common_output_data,$perf_data);
 my (%syshealth,%vpd,%temperature);
 
@@ -71,6 +73,8 @@ $perf_data                  = "";
 $ssh                        = "/usr/bin/ssh";		#location of binary
 $ping                       = "/bin/ping";		#location of binary
 $error_count                = 0;			#initialize counter variable
+$ambient_temperature_warn   = 25;			#degrees celsius 
+$ssh_access                 = "unknown";		#initialize flag variable
 #
 # Nagios return codes
 #
@@ -89,9 +93,10 @@ sub get_options {
    #
    Getopt::Long::Configure('bundling');
    GetOptions(
-      "H=s" => \$opt_H, "host=s"      => \$opt_H,
-      "h"   => \$opt_h, "help"       => \$opt_h,
-      "v"   => \$opt_v, "verbose"    => \$opt_v,
+      "H=s" => \$opt_H, "host=s"        => \$opt_H,
+      "h"   => \$opt_h, "help"          => \$opt_h,
+      "v"   => \$opt_v, "verbose"       => \$opt_v,
+      "t=i" => \$opt_t, "temperature=i" => \$opt_t,
    );
    #
    # If the user did not supply a -H or --host== value, generate a warning.
@@ -112,9 +117,16 @@ sub get_options {
    # see if user provided -h or --help switch
    if ( defined($opt_h) ) {
       print "Usage: $0 -H host \n";
+      print "Usage: $0 -H host --verbose \n";
+      print "Usage: $0 -H host --temperature=25  (warn if ambient temp above than 25C)\n"; 
       exit $UNKNOWN;
    }                                                    #end of if block
-
+   #
+   # see if user provided -t or --temperature=##
+   #
+   if( defined( $opt_t ) ) {
+      $ambient_temperature_warn = $opt_t;
+   } 
 }                       #end of subroutine
 
 
@@ -216,20 +228,21 @@ sub sanity_checks {
    while (<IN>) {                                  	#read a line from STDIN
       if ( /SystemName/) {				#look for text known to be in the command output
          print "   confirmed SSH access \n" if ($verbose eq "yes");
+         $ssh_access = "ok";				#set flag
       }                                            	#end of if block
-      elsif ( /Permission denied/ ) {                 	#This is the error message if public key auth is rejected
+      if ( /Permission denied/ ) {                 	#This is the error message if public key auth is rejected
          print "$CHECK_NAME UNKNOWN - SSH login failed.  Please verify SSH public key authentication to xClarity controller is working. \n";
          exit $UNKNOWN;                            	#exit script
       }                                            	#end of if block
-      elsif ( /Connection closed/ ) {                 	#This is the error message if public key auth is rejected
+      if ( /Connection closed/ ) {                 	#This is the error message if public key auth is rejected
          print "$CHECK_NAME UNKNOWN - SSH login failed, connection closed by remote host.  Please verify SSH daemon is running on xClarity controller and SSH key pair authentication is enabled for the nagios user. \n";
          exit $UNKNOWN;                            	#exit script
       }                                            	#end of if block
-      elsif ( /The authenticity of host/ ) {            #This is the error message if public key auth is rejected
+      if ( /The authenticity of host/ ) {            #This is the error message if public key auth is rejected
          print "$CHECK_NAME UNKNOWN - SSH key fingerprint not recognized.  Please manually ssh from the nagios server to $host and accept the key fingerprint. \n";
          exit $UNKNOWN;                            	#exit script
       }                                            	#end of if block
-      else {            				#we only get this far if the response from the server was unrecognized
+      if ( $ssh_access ne "ok" ) {			#we only get this far if the response from the server was unrecognized
          print "$CHECK_NAME UNKNOWN - could not validate SSH key pair authentication.  Please manually ssh from the nagios server to $host and accept the key fingerprint. \n";
          exit $UNKNOWN;                            	#exit script
       }                                            	#end of if block
@@ -808,7 +821,7 @@ sub print_output {
       $error_text = "System problem detected.  Please SSH into xClarity controller and run syshealth system.";
       $common_output_data = "$error_text $common_output_data";
    }							#end of unless block
-   if ( $temperature{ambient} > 25 ) {
+   if ( $temperature{ambient} > $ambient_temperature_warn ) {
       $error_count++;					#increment counter
       $error_text = "High ambient temperature $temperature{ambient}C detected.  The air conditioning may have failed.";
       $common_output_data = "$error_text $common_output_data";
