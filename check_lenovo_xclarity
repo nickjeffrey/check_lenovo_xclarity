@@ -15,6 +15,7 @@
 #  2020-12-09   njeffrey	Script created
 #  2020-12-11   njeffrey	Add get_vpd, get_ambient_temperature subroutines
 #  2022-06-20 	njeffrey	Add performance data to output for graphing
+#  2023-08-01	njeffrey	Add error checks for validating SSH key pair authentication
 
 
 
@@ -211,22 +212,30 @@ sub sanity_checks {
    print "   trying to SSH into $host \n" if ($verbose eq "yes");
    $cmd = "$ssh -o PreferredAuthentications=publickey -o PubKeyAuthentication=yes $host info";
    print "   running command: $cmd \n" if ($verbose eq "yes");
-   open(IN,"$cmd 2>&1|");     			#ssh into the xClarity controller
-   while (<IN>) {                                  #read a line from STDIN
+   open(IN,"$cmd 2>&1|");     				#ssh into the xClarity controller
+   while (<IN>) {                                  	#read a line from STDIN
       if ( /SystemName/) {				#look for text known to be in the command output
          print "   confirmed SSH access \n" if ($verbose eq "yes");
-      }                                            #end of if block
-      if ( /Permission denied/ ) {                 #This is the error message if public key auth is rejected
+      }                                            	#end of if block
+      elsif ( /Permission denied/ ) {                 	#This is the error message if public key auth is rejected
          print "$CHECK_NAME UNKNOWN - SSH login failed.  Please verify SSH public key authentication to xClarity controller is working. \n";
-         exit $UNKNOWN;                            #exit script
-      }                                            #end of if block
-      if ( /The authenticity of host/ ) {                 #This is the error message if public key auth is rejected
+         exit $UNKNOWN;                            	#exit script
+      }                                            	#end of if block
+      elsif ( /Connection closed/ ) {                 	#This is the error message if public key auth is rejected
+         print "$CHECK_NAME UNKNOWN - SSH login failed, connection closed by remote host.  Please verify SSH daemon is running on xClarity controller and SSH key pair authentication is enabled for the nagios user. \n";
+         exit $UNKNOWN;                            	#exit script
+      }                                            	#end of if block
+      elsif ( /The authenticity of host/ ) {            #This is the error message if public key auth is rejected
          print "$CHECK_NAME UNKNOWN - SSH key fingerprint not recognized.  Please manually ssh from the nagios server to $host and accept the key fingerprint. \n";
-         exit $UNKNOWN;                            #exit script
-      }                                            #end of if block
-   }                                            #end of while loop
-   close IN;                                       #close filehandle
-}                                               #end of subroutine
+         exit $UNKNOWN;                            	#exit script
+      }                                            	#end of if block
+      else {            				#we only get this far if the response from the server was unrecognized
+         print "$CHECK_NAME UNKNOWN - could not validate SSH key pair authentication.  Please manually ssh from the nagios server to $host and accept the key fingerprint. \n";
+         exit $UNKNOWN;                            	#exit script
+      }                                            	#end of if block
+   }                                            	#end of while loop
+   close IN;                                       	#close filehandle
+}                                               	#end of subroutine
 
 
 
