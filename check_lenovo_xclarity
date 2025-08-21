@@ -17,6 +17,7 @@
 #  2022-06-20 	njeffrey	Add performance data to output for graphing
 #  2023-08-01	njeffrey	Add error checks for validating SSH key pair authentication
 #  2023-08-02	njeffrey	Add variables $ambient_temperature_warn, $ssh_access, $opt_t
+#  2025-08-20	njeffrey	Add error check: Local_Storage health is not checked if Power=Off
 
 
 # NOTES
@@ -269,14 +270,14 @@ sub get_syshealth {
    #
    # Sample output from each command is shown below:
    #   system> syshealth summary
-   #   Power     On
+   #   Power     On                 
    #   State     Booting OS or in undetected OS
    #   Restarts  14
    #   Component Type     Status
    #   ==================================
    #   Cooling Devices    Normal
    #   Power Modules      Warning
-   #   Local Storage      Normal
+   #   Local Storage      Normal     <--- NOTE: if the Power is Off, this line will not be shown
    #   Processors         Normal
    #   Memory             Normal
    #   System             Normal
@@ -325,7 +326,7 @@ sub get_syshealth {
    #   Drive 11         Normal
    #   M2 Drive 0       Normal
    #   M2 Drive 1       Normal
-
+   #
    #   Flash DIMMs
    #   FRU Name         Status
    #   ===========================
@@ -359,10 +360,23 @@ sub get_syshealth {
    #
    # Get the health status from the xClarity Controller
    #
+   $syshealth{summary}{Power}           = "unknown";			     #start with dummy value to avoid undef errors 
+   $syshealth{summary}{Cooling_Devices} = "unknown";			     #start with dummy value to avoid undef errors 
+   $syshealth{summary}{Power_Modules}   = "unknown";			     #start with dummy value to avoid undef errors 
+   $syshealth{summary}{Local_Storage}   = "unknown";			     #start with dummy value to avoid undef errors 
+   $syshealth{summary}{Processors}      = "unknown";			     #start with dummy value to avoid undef errors 
+   $syshealth{summary}{Memory}          = "unknown";			     #start with dummy value to avoid undef errors 
+   $syshealth{summary}{System}          = "unknown";			     #start with dummy value to avoid undef errors 
+   # 
    $cmd = "$ssh -o PreferredAuthentications=publickey -o PubKeyAuthentication=yes $host syshealth summary";
    print "   running command: $cmd \n" if ($verbose eq "yes");
    open(IN,"$cmd 2>&1|");                                                    #open filehandle from command output
    while (<IN>) {                                                            #read a line from the command output
+      chomp;								     #remove newline character
+      if (/Power.*(On|Off)/) {     					     #tweaked regex to avoid matching "Power Modules"
+         $syshealth{summary}{Power} = $1;
+         print "   Power:$syshealth{summary}{Power}\n" if ($verbose eq "yes");
+      }
       if ( /^Cooling Devices +([a-zA-Z]+)/ ) {                               #find health metric
          $syshealth{summary}{Cooling_Devices} = $1;                          #save value to hash
          print "   Cooling_Devices:$syshealth{summary}{Cooling_Devices} \n" if ($verbose eq "yes");
@@ -788,7 +802,7 @@ sub print_output {
    $perf_data = "Ambient_temperatureC=$temperature{ambient};;;;";
    #
    # Much of the text of the output will be the same.  Put the common stuff in a variable so we can simplify the outputs
-   $common_output_data = "Ambient_temperature:$temperature{ambient}C Cooling_Devices:$syshealth{summary}{Cooling_Devices} Power_Modules:$syshealth{summary}{Power_Modules} Local_Storage:$syshealth{summary}{Local_Storage} Processors:$syshealth{summary}{Processors} Memory:$syshealth{summary}{Memory} System:$syshealth{summary}{System} Model:$vpd{sys}{Model} Serial:$vpd{sys}{Serial} BMC_firmware:$vpd{fw}{BMC_Primary} UEFI_firmware:$vpd{fw}{UEFI}";
+   $common_output_data = "Power:$syshealth{summary}{Power} Ambient_temperature:$temperature{ambient}C Cooling_Devices:$syshealth{summary}{Cooling_Devices} Power_Modules:$syshealth{summary}{Power_Modules} Local_Storage:$syshealth{summary}{Local_Storage} Processors:$syshealth{summary}{Processors} Memory:$syshealth{summary}{Memory} System:$syshealth{summary}{System} Model:$vpd{sys}{Model} Serial:$vpd{sys}{Serial} BMC_firmware:$vpd{fw}{BMC_Primary} UEFI_firmware:$vpd{fw}{UEFI}";
    #
    # Check for problems
    unless ( $syshealth{summary}{Cooling_Devices} eq "Normal" ) {
@@ -801,11 +815,16 @@ sub print_output {
       $error_text = "Power Module problem detected.  Please SSH into xClarity controller and run syshealth power, syshealth activeevents.";
       $common_output_data = "$error_text $common_output_data";
    }							#end of unless block
-   unless ( $syshealth{summary}{Local_Storage} eq "Normal" ) {
-      $error_count++;					#increment counter
-      $error_text = "Local Storage problem detected.  Please SSH into xClarity controller and run syshealth storage, syshealth activeevents.";
-      $common_output_data = "$error_text $common_output_data";
-   }							#end of unless block
+   #
+   # Local Storage will not be visible if Power=Off
+   #
+   if ($syshealth{summary}{Power} eq "On") {		#confirm Power=On before checking for Local Storage
+      unless ($syshealth{summary}{Local_Storage} eq "Normal") {
+         $error_count++;					#increment counter
+         $error_text = "Local Storage problem detected.  Please SSH into xClarity controller and run syshealth storage, syshealth activeevents.";
+         $common_output_data = "$error_text $common_output_data";
+      }							#end of unless block
+   }							#end of if block
    unless ( $syshealth{summary}{Processors} eq "Normal" ) {
       $error_count++;					#increment counter
       $error_text = "Processor problem detected.  Please SSH into xClarity controller and run syshealth processor, syshealth activeevents.";
